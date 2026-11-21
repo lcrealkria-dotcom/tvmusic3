@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+    <title>qb_tvmusic</title>
+    <style>
+        html, body {
+            margin: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            overflow: hidden;
+        }
+        #ytbox, #media, #sc {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: 0;
+        }
+        #media, #sc {
+            display: none;
+        }
+        #media {
+            object-fit: contain;
+            background: #000;
+        }
+        #status {
+            display: none;
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            padding: 8px 12px;
+            font: 22px sans-serif;
+            color: #fff;
+            background: rgba(180, 0, 0, 0.85);
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <div id="ytbox"></div>
+    <video id="media" playsinline></video>
+    <iframe id="sc" allow="autoplay"></iframe>
+    <div id="status"></div>
+
+    <!-- player.js precisa vir antes das APIs externas -->
+    <script>
+let ytApiReady = false;
+let ytPlayer = null;
+let ytReady = false;
+let pending = null;
+let volume = 50;
+
+let scWidget = null;
+let scStart = 0;
+let currentKind = null;
+
+const media = document.getElementById('media');
+const scFrame = document.getElementById('sc');
+const ytBox = document.getElementById('ytbox');
+const statusEl = document.getElementById('status');
+
+function showStatus(text) {
+    statusEl.textContent = text || '';
+    statusEl.style.display = text ? 'block' : 'none';
+}
+
+function show(kind) {
+    ytBox.style.display = kind === 'youtube' ? 'block' : 'none';
+    media.style.display = kind === 'media' ? 'block' : 'none';
+    scFrame.style.display = kind === 'soundcloud' ? 'block' : 'none';
+}
+
+/* ---------------- YouTube ---------------- */
+const YT_ERRORS = {
+    2: 'link/ID inválido',
+    5: 'erro no player HTML5',
+    100: 'vídeo não encontrado ou privado',
+    101: 'o dono bloqueou a reprodução em outros sites',
+    150: 'o dono bloqueou a reprodução em outros sites',
+    153: 'o YouTube recusou o player (não recebeu o Referer)',
+};
+
+// Chamada automaticamente pela API do YouTube
+window.onYouTubeIframeAPIReady = () => {
+    ytApiReady = true;
+    if (pending) {
+        const d = pending;
+        pending = null;
+        play(d);
+    }
+};
+
+setTimeout(() => {
+    if (!ytApiReady) showStatus('API do YouTube não carregou (verifique a internet do cliente)');
+}, 10000);
+
+function destroyYouTube() {
+    ytReady = false;
+    if (ytPlayer && typeof ytPlayer.destroy === 'function') {
+        try { ytPlayer.destroy(); } catch (e) { /* ignora */ }
+    }
+    ytPlayer = null;
+    ytBox.innerHTML = '';
+}
+
+// Cria o iframe manualmente, com referrerpolicy explícito e domínio youtube-nocookie
+function startYouTube(d) {
+    destroyYouTube();
+
+    const params = new URLSearchParams({
+        enablejsapi: '1',
+        autoplay: '1',
+        controls: '0',
+        disablekb: '1',
+        fs: '0',
+        modestbranding: '1',
+        rel: '0',
+        playsinline: '1',
+        iv_load_policy: '3',
+        start: String(Math.floor(Math.max(0, d.start))),
+    });
+    if (location.protocol.startsWith('http')) params.set('origin', location.origin);
+
+    const frame = document.createElement('iframe');
+    frame.referrerPolicy = 'strict-origin-when-cross-origin';
+    frame.allow = 'autoplay; encrypted-media';
+    frame.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;border:0';
+    frame.src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(d.source.id) + '?' + params.toString();
+    ytBox.appendChild(frame);
+
+    ytPlayer = new YT.Player(frame, {
+        events: {
+            onReady: () => {
+                ytReady = true;
+                ytPlayer.setVolume(volume);
+                ytPlayer.playVideo();
+            },
+            onStateChange: (e) => {
+                if (e.data === 1) showStatus(''); // tocando
+            },
+            onError: (e) => {
+                let msg = 'Erro do YouTube ' + e.data + ': ' + (YT_ERRORS[e.data] || 'desconhecido');
+                if (e.data === 153) {
+                    msg += ' [origem: ' + location.origin + ']';
+                    if (location.protocol !== 'https:') {
+                        msg += ' — hospede a página em https e configure o PlayerURL';
+                    }
+                }
+                showStatus(msg);
+            },
+        },
+    });
+}
+
+/* ---------------- SoundCloud ---------------- */
+const SC_OPTS = '&auto_play=true&visual=true&hide_related=true&show_comments=false&show_reposts=false&show_teaser=false';
+
+function scApply() {
+    if (!scWidget) return;
+    scWidget.setVolume(volume);
+    if (scStart > 1.5) scWidget.seekTo(scStart * 1000);
+    scWidget.play();
+}
+
+function playSoundCloud(url) {
+    if (typeof SC === 'undefined') {
+        showStatus('API do SoundCloud não carregou (verifique a internet do cliente)');
+        return;
+    }
+
+    if (!scWidget) {
+        scFrame.src = 'https://w.soundcloud.com/player/?url=' + encodeURIComponent(url) + SC_OPTS;
+        scWidget = SC.Widget(scFrame);
+        scWidget.bind(SC.Widget.Events.READY, scApply);
+        scWidget.bind(SC.Widget.Events.PLAY, () => showStatus(''));
+        scWidget.bind(SC.Widget.Events.ERROR, () => {
+            showStatus('Erro do SoundCloud (faixa indisponível, privada ou bloqueada?)');
+        });
+    } else {
+        scWidget.load(url, {
+            auto_play: true,
+            visual: true,
+            hide_related: true,
+            show_comments: false,
+            callback: scApply,
+        });
+    }
+}
+
+/* ---------------- Mídia direta ---------------- */
+media.onerror = () => {
+    if (media.getAttribute('src')) showStatus('Erro ao carregar o arquivo de mídia');
+};
+media.onplaying = () => showStatus('');
+
+/* ---------------- Controle geral ---------------- */
+function stopAll() {
+    pending = null;
+    destroyYouTube();
+    if (scWidget) scWidget.pause();
+    media.pause();
+    media.removeAttribute('src');
+    media.load();
+}
+
+function setVolume(v) {
+    volume = Math.max(0, Math.min(100, v));
+    if (pending) pending.volume = volume;
+    if (ytReady && ytPlayer) ytPlayer.setVolume(volume);
+    if (scWidget) scWidget.setVolume(volume);
+    media.volume = volume / 100;
+}
+
+function pauseAll() {
+    if (currentKind === 'youtube' && ytReady) ytPlayer.pauseVideo();
+    else if (currentKind === 'soundcloud' && scWidget) scWidget.pause();
+    else if (currentKind === 'media') media.pause();
+}
+
+function resumeAll() {
+    if (currentKind === 'youtube' && ytReady) ytPlayer.playVideo();
+    else if (currentKind === 'soundcloud' && scWidget) scWidget.play();
+    else if (currentKind === 'media') media.play().catch(() => {});
+}
+
+function play(d) {
+    const s = d.source;
+    volume = d.volume;
+    scStart = d.start;
+    currentKind = s.type === 'youtube' ? 'youtube' : (s.type === 'soundcloud' ? 'soundcloud' : 'media');
+    showStatus('');
+    stopAll();
+
+    if (s.type === 'youtube') {
+        show('youtube');
+        if (!ytApiReady) {
+            pending = d;
+            return;
+        }
+        startYouTube(d);
+    } else if (s.type === 'soundcloud') {
+        show('soundcloud');
+        playSoundCloud(s.url);
+    } else {
+        show('media');
+        media.volume = Math.min(1, volume / 100);
+        media.src = s.url;
+        media.onloadedmetadata = () => {
+            if (isFinite(media.duration) && d.start < media.duration) {
+                media.currentTime = d.start;
+            }
+            media.play().catch((err) => showStatus('Autoplay bloqueado: ' + err.message));
+        };
+    }
+}
+
+window.addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || !d.action) return;
+
+    if (d.action === 'play') {
+        play(d);
+    } else if (d.action === 'volume') {
+        setVolume(d.volume);
+    } else if (d.action === 'pause') {
+        pauseAll();
+    } else if (d.action === 'resume') {
+        resumeAll();
+    } else if (d.action === 'stop') {
+        showStatus('');
+        stopAll();
+    }
+});
+
+</script>
+    <script src="https://w.soundcloud.com/player/api.js"></script>
+    <script src="https://www.youtube.com/iframe_api"></script>
+</body>
+</html>
